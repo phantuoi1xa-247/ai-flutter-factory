@@ -1,0 +1,86 @@
+name: flutter-ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Nhánh chứa mã app do AI sinh ra
+        required: true
+        type: string
+      run_key:
+        description: Mã phiên AI App Factory
+        required: true
+        type: string
+      round:
+        description: Số vòng kiểm tra
+        required: true
+        type: string
+      callback_url:
+        description: URL n8n nhận kết quả
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: app-${{ inputs.run_key }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUN_KEY: ${{ inputs.run_key }}
+      ROUND: ${{ inputs.round }}
+      BRANCH: ${{ inputs.branch }}
+      REPO_NAME: ${{ github.event.repository.name }}
+      PAGES_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+    steps:
+      - name: Đọc callback (ẩn khỏi log)
+        run: |
+          CB=$(jq -r '.inputs.callback_url' "$GITHUB_EVENT_PATH")
+          echo "::add-mask::$CB"
+          echo "CALLBACK_URL=$CB" >> "$GITHUB_ENV"
+
+      - name: Lấy script CI
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Lấy mã app
+        id: checkout_app
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          path: app
+
+      - name: Cài Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Phân tích, test, kiểm tra kiến trúc, build web
+        id: checks
+        run: bash tools/ci/run_checks.sh
+
+      - name: Đăng bản chạy thử lên GitHub Pages
+        id: deploy
+        if: steps.checks.outputs.build_ok == 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: app/build/web
+          destination_dir: ${{ inputs.run_key }}/r${{ inputs.round }}
+          keep_files: true
+
+      - name: Gửi báo cáo về n8n
+        if: always()
+        env:
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout_app.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 tools/ci/send_report.py
